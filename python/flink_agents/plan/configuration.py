@@ -15,6 +15,7 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 #################################################################################
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Type
 
@@ -84,6 +85,20 @@ class AgentConfiguration(BaseModel, Configuration):
         value = self.conf_data.get(key)
         if value is None:
             return default
+
+        if isinstance(config_type, type) and issubclass(config_type, Enum):
+            if isinstance(value, config_type):
+                return value
+            if isinstance(value, str):
+                for member in config_type:
+                    if member.value == value or member.name == value:
+                        return member
+                try:
+                    return config_type(value)
+                except ValueError:
+                    pass
+            msg = f"Invalid value for {key}: {value}"
+            raise ValueError(msg)
 
         try:
             return config_type(value)

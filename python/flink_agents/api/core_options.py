@@ -71,7 +71,7 @@ class AgentConfigOptionsMeta(type):
         return python_option
 
 
-class ErrorHandlingStrategy(Enum):
+class ErrorHandlingStrategy(str, Enum):
     """Error handling strategy for Agent.
 
     Currently, only works for chat action.
@@ -80,6 +80,20 @@ class ErrorHandlingStrategy(Enum):
     RETRY = "retry"
     FAIL = "fail"
     IGNORE = "ignore"
+
+
+class ShortTermMemoryStateTtlUpdateType(str, Enum):
+    """TTL refresh policy for short-term memory MapState; matches Java Agent.ShortTermMemoryStateTtlUpdateType."""
+
+    ON_READ_AND_WRITE = "ON_READ_AND_WRITE"
+    ON_CREATE_AND_WRITE = "ON_CREATE_AND_WRITE"
+
+
+class ShortTermMemoryStateTtlVisibility(str, Enum):
+    """TTL read visibility for short-term memory MapState; matches Java Agent.ShortTermMemoryStateTtlVisibility."""
+
+    NEVER_RETURN_EXPIRED = "NEVER_RETURN_EXPIRED"
+    RETURN_EXPIRED_IF_NOT_CLEANED_UP = "RETURN_EXPIRED_IF_NOT_CLEANED_UP"
 
 
 class AgentConfigOptions(metaclass=AgentConfigOptionsMeta):
@@ -129,4 +143,22 @@ class AgentExecutionOptions:
         key="rag.async",
         config_type=bool,
         default=True,
+    )
+
+    SHORT_TERM_MEMORY_STATE_TTL_MS = ConfigOption(
+        key="short-term-memory.state-ttl.ms",
+        config_type=int,
+        default=0,
+    )
+
+    SHORT_TERM_MEMORY_STATE_TTL_UPDATE_TYPE = ConfigOption(
+        key="short-term-memory.state-ttl.update-type",
+        config_type=ShortTermMemoryStateTtlUpdateType,
+        default=ShortTermMemoryStateTtlUpdateType.ON_READ_AND_WRITE,
+    )
+
+    SHORT_TERM_MEMORY_STATE_TTL_VISIBILITY = ConfigOption(
+        key="short-term-memory.state-ttl.visibility",
+        config_type=ShortTermMemoryStateTtlVisibility,
+        default=ShortTermMemoryStateTtlVisibility.NEVER_RETURN_EXPIRED,
     )

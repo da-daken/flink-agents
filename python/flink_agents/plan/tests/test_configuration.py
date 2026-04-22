@@ -22,6 +22,11 @@ import pytest
 import yaml
 
 from flink_agents.api.configuration import ConfigOption
+from flink_agents.api.core_options import (
+    AgentExecutionOptions,
+    ErrorHandlingStrategy,
+    ShortTermMemoryStateTtlUpdateType,
+)
 from flink_agents.plan.configuration import AgentConfiguration
 
 
@@ -226,3 +231,18 @@ def test_get_with_null_and_default() -> None:  # noqa: D103
     config.set_str("nullable.str", None)
 
     assert config.get(nullable_str) == "default"
+
+
+def test_get_with_enum_option() -> None:
+    """Enum option values in config should parse from string keys."""
+    config = AgentConfiguration(
+        {
+            'error-handling-strategy': 'retry',
+            'short-term-memory.state-ttl.update-type': 'ON_CREATE_AND_WRITE',
+        }
+    )
+    assert config.get(AgentExecutionOptions.ERROR_HANDLING_STRATEGY) == ErrorHandlingStrategy.RETRY
+    assert (
+        config.get(AgentExecutionOptions.SHORT_TERM_MEMORY_STATE_TTL_UPDATE_TYPE)
+        == ShortTermMemoryStateTtlUpdateType.ON_CREATE_AND_WRITE
+    )

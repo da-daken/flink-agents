@@ -21,6 +21,7 @@ import org.apache.flink.agents.api.Event;
 import org.apache.flink.agents.api.EventContext;
 import org.apache.flink.agents.api.InputEvent;
 import org.apache.flink.agents.api.OutputEvent;
+import org.apache.flink.agents.api.agents.Agent;
 import org.apache.flink.agents.api.agents.AgentExecutionOptions;
 import org.apache.flink.agents.api.context.MemoryUpdate;
 import org.apache.flink.agents.api.listener.EventListener;
@@ -64,6 +65,7 @@ import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -92,6 +94,7 @@ import org.slf4j.LoggerFactory;
 import pemja.core.PythonInterpreter;
 
 import java.lang.reflect.Field;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -262,6 +265,7 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
                         "shortTermMemory",
                         TypeInformation.of(String.class),
                         TypeInformation.of(MemoryObjectImpl.MemoryItem.class));
+        maybeEnableShortTermMemoryStateTtl(shortTermMemStateDescriptor);
         shortTermMemState = getRuntimeContext().getMapState(shortTermMemStateDescriptor);
 
         metricGroup = new FlinkAgentsMetricGroupImpl(getMetricGroup());
@@ -1123,6 +1127,48 @@ public class ActionExecutionOperator<IN, OUT> extends AbstractStreamOperator<OUT
             LOG.info("Using Kafka as backend of action state store.");
             actionStateStore = new KafkaActionStateStore(agentPlan.getConfig());
         }
+    }
+
+    /**
+     * When {@link AgentExecutionOptions#SHORT_TERM_MEMORY_STATE_TTL_MS} is positive, attaches
+     * Flink {@link StateTtlConfig} to the short-term memory {@link MapStateDescriptor}. Unset,
+     * null, or non-positive values disable TTL (Flink does not allow zero/negative TTL). Only
+     * {@code shortTermMemory} is affected; sensory memory has no TTL.
+     */
+    private void maybeEnableShortTermMemoryStateTtl(
+            MapStateDescriptor<String, MemoryObjectImpl.MemoryItem> descriptor) {
+        Long ttlMs =
+                agentPlan.getConfig().get(AgentExecutionOptions.SHORT_TERM_MEMORY_STATE_TTL_MS);
+        if (ttlMs == null || ttlMs <= 0) {
+            return;
+        }
+        Agent.ShortTermMemoryStateTtlUpdateType updateType =
+                agentPlan
+                        .getConfig()
+                        .get(AgentExecutionOptions.SHORT_TERM_MEMORY_STATE_TTL_UPDATE_TYPE);
+        Agent.ShortTermMemoryStateTtlVisibility visibility =
+                agentPlan
+                        .getConfig()
+                        .get(AgentExecutionOptions.SHORT_TERM_MEMORY_STATE_TTL_VISIBILITY);
+
+        StateTtlConfig.UpdateType flinkUpdate =
+                updateType == Agent.ShortTermMemoryStateTtlUpdateType.ON_CREATE_AND_WRITE
+                        ? StateTtlConfig.UpdateType.OnCreateAndWrite
+                        : StateTtlConfig.UpdateType.OnReadAndWrite;
+        StateTtlConfig.StateVisibility flinkVisibility =
+                visibility
+                                == Agent.ShortTermMemoryStateTtlVisibility
+                                        .RETURN_EXPIRED_IF_NOT_CLEANED_UP
+                        ? StateTtlConfig.StateVisibility.ReturnExpiredIfNotCleanedUp
+                        : StateTtlConfig.StateVisibility.NeverReturnExpired;
+
+        StateTtlConfig ttlConfig =
+                StateTtlConfig.newBuilder(Duration.ofMillis(ttlMs))
+                        .setUpdateType(flinkUpdate)
+                        .setStateVisibility(flinkVisibility)
+                        .cleanupFullSnapshot()
+                        .build();
+        descriptor.enableTimeToLive(ttlConfig);
     }
 
     /** Failed to execute Action task. */

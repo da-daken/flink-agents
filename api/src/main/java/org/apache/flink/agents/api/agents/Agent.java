@@ -126,5 +126,23 @@ public class Agent {
         }
     }
 
+    /**
+     * TTL refresh policy for short-term memory {@link org.apache.flink.api.common.state.MapState}
+     * entries; maps to {@link org.apache.flink.api.common.state.StateTtlConfig.UpdateType}.
+     */
+    public enum ShortTermMemoryStateTtlUpdateType {
+        ON_READ_AND_WRITE,
+        ON_CREATE_AND_WRITE
+    }
+
+    /**
+     * Visibility of expired short-term memory map entries on read; maps to {@link
+     * org.apache.flink.api.common.state.StateTtlConfig.StateVisibility}.
+     */
+    public enum ShortTermMemoryStateTtlVisibility {
+        NEVER_RETURN_EXPIRED,
+        RETURN_EXPIRED_IF_NOT_CLEANED_UP
+    }
+
     public static String STRUCTURED_OUTPUT = "structured_output";
 }
