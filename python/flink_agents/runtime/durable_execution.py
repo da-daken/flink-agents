@@ -56,32 +56,26 @@ def durable_identity_for_call(
     func: Callable,
     args: tuple,
     kwargs: dict | None,
-) -> tuple[str, str]:
+) -> str:
     """Return the durable journal identity for a single callable invocation.
 
     An explicit id attached by :func:`with_durable_id` is the authoritative
-    recovery identity: the returned args digest is empty, so recovery matches
-    on the id alone. Callers owning an explicit id must guarantee that the
+    recovery identity. Callers owning an explicit id must guarantee that the
     same id always denotes the same logical call, because diverging arguments
     are not detected. Without an explicit id, the identity is derived from the
     callable's module/qualname plus a digest of the serialized arguments.
     """
     explicit_id = get_durable_id(func)
     if explicit_id is not None:
-        return explicit_id, ""
+        return explicit_id
     call_kwargs = kwargs or {}
-    return _compute_function_id(func), _compute_args_digest(args, call_kwargs)
+    function_id = _compute_function_id(func)
+    args_digest = _compute_args_digest(args, call_kwargs)
+    return f"{function_id}#{args_digest}"
 
 
 def _compute_function_id(func: Callable) -> str:
-    """Compute a stable function identifier from a callable.
-
-    An explicit id attached by :func:`with_durable_id` wins over the derived
-    module/qualname.
-    """
-    explicit_id = get_durable_id(func)
-    if explicit_id is not None:
-        return explicit_id
+    """Compute a stable function identifier from a callable."""
     module_obj = inspect.getmodule(func)
     module = (
         module_obj.__name__

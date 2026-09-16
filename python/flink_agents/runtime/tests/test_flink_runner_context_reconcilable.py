@@ -27,7 +27,6 @@ import pytest
 from flink_agents.api.runner_context import DurableCall
 from flink_agents.plan.configuration import AgentConfiguration
 from flink_agents.runtime.durable_execution import (
-    _compute_args_digest,
     _compute_function_id,
     durable_identity_for_call,
 )
@@ -37,7 +36,6 @@ from flink_agents.runtime.flink_runner_context import FlinkRunnerContext
 @dataclass
 class _StoredCallResult:
     function_id: str
-    args_digest: str
     status: str
     result_payload: bytes | None = None
     exception_payload: bytes | None = None
@@ -51,16 +49,31 @@ def _durable_call(
     return DurableCall(func=func, args=args, kwargs=kwargs or None)
 
 
+def _batch_calls(ctx: FlinkRunnerContext, calls: list[DurableCall]) -> Any:
+    """Convert a list of DurableCall to a durable_execute_all_async call (test helper)."""
+    awaitables = []
+    for call in calls:
+        awaitables.append(
+            ctx.durable_execute_async(
+                call.func,
+                *call.args,
+                **(call.kwargs or {}),
+                reconciler=call.reconciler,
+                durable_id=call.durable_id,
+            )
+        )
+    return ctx.durable_execute_all_async(*awaitables)
+
+
 def _stored_call(
     func: Callable[..., Any],
     *args: Any,
     status: str,
     **kwargs: Any,
 ) -> _StoredCallResult:
-    function_id, args_digest = durable_identity_for_call(func, args, kwargs or None)
+    identity = durable_identity_for_call(func, args, kwargs or None)
     return _StoredCallResult(
-        function_id=function_id,
-        args_digest=args_digest,
+        function_id=identity,
         status=status,
     )
 
@@ -80,7 +93,6 @@ class _FakeJavaRunnerContext:
             current = self.call_results[index]
             return [
                 current.function_id,
-                current.args_digest,
                 current.status,
                 current.result_payload,
                 current.exception_payload,
@@ -93,7 +105,6 @@ class _FakeJavaRunnerContext:
             current = self.call_results[self.current_call_index]
             return [
                 current.function_id,
-                current.args_digest,
                 current.status,
                 current.result_payload,
                 current.exception_payload,
@@ -101,15 +112,12 @@ class _FakeJavaRunnerContext:
         return None
 
     def matchNextOrClearSubsequentCallResult(
-        self, function_id: str, args_digest: str
+        self, function_id: str
     ) -> list[Any] | None:
         self.operations.append("match")
         if self.current_call_index < len(self.call_results):
             current = self.call_results[self.current_call_index]
-            if (
-                current.function_id == function_id
-                and current.args_digest == args_digest
-            ):
+            if current.function_id == function_id:
                 if current.status == "PENDING":
                     return None
                 self.current_call_index += 1
@@ -120,7 +128,6 @@ class _FakeJavaRunnerContext:
     def recordCallCompletion(
         self,
         function_id: str,
-        args_digest: str,
         result_payload: bytes | None,
         exception_payload: bytes | None,
     ) -> None:
@@ -129,7 +136,6 @@ class _FakeJavaRunnerContext:
         self.call_results.append(
             _StoredCallResult(
                 function_id=function_id,
-                args_digest=args_digest,
                 status=status,
                 result_payload=result_payload,
                 exception_payload=exception_payload,
@@ -137,12 +143,11 @@ class _FakeJavaRunnerContext:
         )
         self.current_call_index += 1
 
-    def appendPendingCall(self, function_id: str, args_digest: str) -> None:
+    def appendPendingCall(self, function_id: str) -> None:
         self.operations.append("append_pending")
         self.call_results.append(
             _StoredCallResult(
                 function_id=function_id,
-                args_digest=args_digest,
                 status="PENDING",
             )
         )
@@ -158,10 +163,8 @@ class _FakeJavaRunnerContext:
         current = self.call_results[self.current_call_index]
         assert current.status == "PENDING"
         assert current.function_id == function_id
-        assert current.args_digest == args_digest
         self.call_results[self.current_call_index] = _StoredCallResult(
             function_id=function_id,
-            args_digest=args_digest,
             status="FAILED" if exception_payload is not None else "SUCCEEDED",
             result_payload=result_payload,
             exception_payload=exception_payload,
@@ -173,14 +176,13 @@ class _FakeJavaRunnerContext:
         self.call_results = self.call_results[: self.current_call_index]
 
     def reservePendingBatch(
-        self, function_ids: list[str], args_digests: list[str]
+        self, function_ids: list[str]
     ) -> None:
         self.operations.append(f"reserve:{len(function_ids)}")
-        for function_id, digest in zip(function_ids, args_digests, strict=True):
+        for function_id in function_ids:
             self.call_results.append(
                 _StoredCallResult(
                     function_id=function_id,
-                    args_digest=digest,
                     status="PENDING",
                 )
             )
@@ -189,7 +191,6 @@ class _FakeJavaRunnerContext:
         self,
         index: int,
         function_id: str,
-        args_digest: str,
         result_payload: bytes | None,
         exception_payload: bytes | None,
     ) -> None:
@@ -197,10 +198,8 @@ class _FakeJavaRunnerContext:
         current = self.call_results[index]
         assert current.status == "PENDING"
         assert current.function_id == function_id
-        assert current.args_digest == args_digest
         self.call_results[index] = _StoredCallResult(
             function_id=function_id,
-            args_digest=args_digest,
             status="FAILED" if exception_payload is not None else "SUCCEEDED",
             result_payload=result_payload,
             exception_payload=exception_payload,
@@ -250,10 +249,10 @@ def _preload_pending(
     *args: Any,
     **kwargs: Any,
 ) -> None:
+    identity = durable_identity_for_call(func, args, kwargs or None)
     j_runner_context.call_results.append(
         _StoredCallResult(
-            function_id=_compute_function_id(func),
-            args_digest=_compute_args_digest(args, kwargs),
+            function_id=identity,
             status="PENDING",
         )
     )
@@ -357,12 +356,10 @@ def test_flink_runner_context_sync_reconciler_mismatch_clears_and_executes() -> 
         [
             _StoredCallResult(
                 function_id=_compute_function_id(_call_value),
-                args_digest=_compute_args_digest(("other-order",), {}),
                 status="PENDING",
             ),
             _StoredCallResult(
                 function_id="stale.function",
-                args_digest="stale-args",
                 status="SUCCEEDED",
                 result_payload=stale_result_payload,
             ),
@@ -390,12 +387,8 @@ def test_flink_runner_context_sync_reconciler_mismatch_clears_and_executes() -> 
         "finalize",
     ]
     assert len(j_runner_context.call_results) == 1
-    assert j_runner_context.call_results[0].function_id == _compute_function_id(
-        _call_value
-    )
-    assert j_runner_context.call_results[0].args_digest == _compute_args_digest(
-        ("order-1",), {}
-    )
+    expected_id = durable_identity_for_call(_call_value, ("order-1",), {})
+    assert j_runner_context.call_results[0].function_id == expected_id
     assert j_runner_context.call_results[0].status == "SUCCEEDED"
 
 
@@ -417,17 +410,17 @@ def test_flink_runner_context_durable_execute_reexecutes_pending_after_batch_res
         second_call_count += 1
         return "two"
 
-    first_id, first_digest = durable_identity_for_call(first_call, (), None)
-    second_id, second_digest = durable_identity_for_call(second_call, (), None)
+    first_id = durable_identity_for_call(first_call, (), None)
+    second_id = durable_identity_for_call(second_call, (), None)
     j_runner_context.call_results = [
         _StoredCallResult(
             function_id=first_id,
-            args_digest=first_digest,
+            
             status="PENDING",
         ),
         _StoredCallResult(
             function_id=second_id,
-            args_digest=second_digest,
+            
             status="PENDING",
         ),
     ]
@@ -461,11 +454,10 @@ def test_flink_runner_context_durable_execute_async_reexecutes_pending_after_bat
         call_count += 1
         return f"call:{value}"
 
-    function_id, args_digest = durable_identity_for_call(tracked_call, ("order-1",), None)
+    identity = durable_identity_for_call(tracked_call, ("order-1",), None)
     j_runner_context.call_results = [
         _StoredCallResult(
-            function_id=function_id,
-            args_digest=args_digest,
+            function_id=identity,
             status="PENDING",
         ),
     ]
@@ -620,7 +612,7 @@ def test_flink_runner_context_durable_execute_all_async_runs_calls_in_parallel()
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(concurrent_call, "one"),
                     _durable_call(concurrent_call, "two"),
@@ -646,7 +638,7 @@ def test_flink_runner_context_durable_execute_all_async_initial_batch() -> None:
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(_call_value, "one"),
                     _durable_call(_call_value, "two"),
@@ -687,7 +679,7 @@ def test_flink_runner_context_durable_execute_all_async_finalize_failure_keeps_s
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(lambda: "one"),
                     _durable_call(lambda: "two"),
@@ -717,14 +709,14 @@ def test_flink_runner_context_durable_execute_all_async_recovers_partial_batch()
         return _call_value(value)
 
     cached_call = _durable_call(tracked_call, "one")
-    cached_function_id, cached_digest = durable_identity_for_call(
+    cached_id = durable_identity_for_call(
         cached_call.func, cached_call.args, cached_call.kwargs
     )
     j_runner_context.call_results.extend(
         [
             _StoredCallResult(
-                function_id=cached_function_id,
-                args_digest=cached_digest,
+                function_id=cached_id,
+                
                 status="SUCCEEDED",
                 result_payload=cloudpickle.dumps("cached-one"),
             ),
@@ -735,7 +727,7 @@ def test_flink_runner_context_durable_execute_all_async_recovers_partial_batch()
     ctx = _create_runner_context(j_runner_context)
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(tracked_call, "one"),
                     _durable_call(tracked_call, "two"),
@@ -754,13 +746,13 @@ def test_flink_runner_context_durable_execute_all_async_recovers_partial_batch()
 def test_flink_runner_context_durable_execute_all_async_returns_cached_failure() -> None:
     j_runner_context = _FakeJavaRunnerContext()
     cached_call = _durable_call(_call_value, "one")
-    cached_function_id, cached_digest = durable_identity_for_call(
+    cached_id = durable_identity_for_call(
         cached_call.func, cached_call.args, cached_call.kwargs
     )
     j_runner_context.call_results.append(
         _StoredCallResult(
-            function_id=cached_function_id,
-            args_digest=cached_digest,
+            function_id=cached_id,
+            
             status="FAILED",
             exception_payload=cloudpickle.dumps(ValueError("cached failure")),
         )
@@ -769,7 +761,7 @@ def test_flink_runner_context_durable_execute_all_async_returns_cached_failure()
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [_durable_call(_call_value, "one")]
             )
         )
@@ -792,7 +784,7 @@ def test_flink_runner_context_durable_execute_all_async_collects_failures() -> N
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(_call_value, "one"),
                     _durable_call(fail_call),
@@ -831,7 +823,7 @@ def test_flink_runner_context_durable_execute_all_async_timeout_keeps_completed_
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(lambda: "fast"),
                     _durable_call(slow_call),
@@ -870,7 +862,7 @@ def test_flink_runner_context_durable_execute_all_async_timeout_leaves_unsubmitt
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(blocking_call, "one"),
                     _durable_call(blocking_call, "two"),
@@ -924,7 +916,7 @@ def test_flink_runner_context_durable_execute_all_async_timeout_leaves_queued_sl
 
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(blocking_call, "one"),
                     _durable_call(blocking_call, "two"),
@@ -958,20 +950,20 @@ def test_flink_runner_context_durable_execute_all_async_returns_deserialize_fail
 ):
     j_runner_context = _FakeJavaRunnerContext()
     call = _durable_call(lambda: "should-not-run")
-    function_id, args_digest = durable_identity_for_call(
+    identity = durable_identity_for_call(
         call.func, call.args, call.kwargs
     )
     j_runner_context.call_results.append(
         _StoredCallResult(
-            function_id=function_id,
-            args_digest=args_digest,
+            function_id=identity,
+            
             status="SUCCEEDED",
             result_payload=b"not-valid-pickle",
         )
     )
     ctx = _create_runner_context(j_runner_context)
     try:
-        outcomes = _run_async(ctx.durable_execute_all_async([call]))
+        outcomes = _run_async(_batch_calls(ctx,[call]))
     finally:
         _close_runner_context(ctx)
 
@@ -996,19 +988,18 @@ def test_flink_runner_context_durable_execute_all_async_reconciles_pending_slot(
         return "recovered"
 
     call = DurableCall(func=tracked_call, reconciler=reconciler)
-    function_id, args_digest = durable_identity_for_call(
+    identity = durable_identity_for_call(
         call.func, call.args, call.kwargs
     )
     j_runner_context.call_results.append(
         _StoredCallResult(
-            function_id=function_id,
-            args_digest=args_digest,
+            function_id=identity,
             status="PENDING",
         )
     )
     ctx = _create_runner_context(j_runner_context)
     try:
-        outcomes = _run_async(ctx.durable_execute_all_async([call]))
+        outcomes = _run_async(_batch_calls(ctx,[call]))
     finally:
         _close_runner_context(ctx)
 
@@ -1033,32 +1024,32 @@ def test_flink_runner_context_durable_execute_all_async_recovers_three_slot_part
     first = _durable_call(tracked_call, "one")
     second = _durable_call(tracked_call, "two")
     third = _durable_call(tracked_call, "three")
-    first_id, first_digest = durable_identity_for_call(
+    first_id = durable_identity_for_call(
         first.func, first.args, first.kwargs
     )
-    second_id, second_digest = durable_identity_for_call(
+    second_id = durable_identity_for_call(
         second.func, second.args, second.kwargs
     )
-    third_id, third_digest = durable_identity_for_call(
+    third_id = durable_identity_for_call(
         third.func, third.args, third.kwargs
     )
     j_runner_context.call_results.extend(
         [
             _StoredCallResult(
                 function_id=first_id,
-                args_digest=first_digest,
+                
                 status="SUCCEEDED",
                 result_payload=cloudpickle.dumps("cached-one"),
             ),
             _StoredCallResult(
                 function_id=second_id,
-                args_digest=second_digest,
+                
                 status="SUCCEEDED",
                 result_payload=cloudpickle.dumps("cached-two"),
             ),
             _StoredCallResult(
                 function_id=third_id,
-                args_digest=third_digest,
+                
                 status="PENDING",
             ),
         ]
@@ -1067,7 +1058,7 @@ def test_flink_runner_context_durable_execute_all_async_recovers_three_slot_part
     ctx = _create_runner_context(j_runner_context)
     try:
         outcomes = _run_async(
-            ctx.durable_execute_all_async([first, second, third])
+            _batch_calls(ctx,[first, second, third])
         )
     finally:
         _close_runner_context(ctx)
@@ -1105,7 +1096,7 @@ def test_flink_runner_context_durable_execute_all_async_respects_max_parallelism
     try:
         start = time.perf_counter()
         outcomes = _run_async(
-            ctx.durable_execute_all_async(
+            _batch_calls(ctx,
                 [
                     _durable_call(slow_call, "one"),
                     _durable_call(slow_call, "two"),

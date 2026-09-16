@@ -88,7 +88,6 @@ def _root_cause(error: BaseException) -> BaseException:
 @dataclass(frozen=True)
 class _PersistedCallResult:
     function_id: str
-    args_digest: str
     status: str
     result_payload: bytes | None
     exception_payload: bytes | None
@@ -110,113 +109,17 @@ class _BatchExecutionPlan:
     execution_start: int = -1
 
 
-class _DurableExecutionResult:
-    """Wrapper that holds result and triggers recording when unwrapped."""
+class _DeferredDurableAsyncExecutionResult(AsyncExecutionResult):
+    """An AsyncExecutionResult that defers recovery matching until awaited.
 
-    def __init__(
-        self,
-        func: Callable,
-        args: tuple,
-        kwargs: dict,
-        result: Any,
-        record_callback: Callable,
-    ) -> None:
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-        self.result = result
-        self.record_callback = record_callback
-        self._recorded = False
-
-    def get_result(self) -> Any:
-        """Get the result and record completion if not already recorded."""
-        if not self._recorded:
-            self.record_callback(self.func, self.args, self.kwargs, self.result, None)
-            self._recorded = True
-        return self.result
-
-
-class _DurableExecutionException(Exception):
-    """Wrapper exception that holds exception info and triggers recording."""
-
-    def __init__(
-        self,
-        func: Callable,
-        args: tuple,
-        kwargs: dict,
-        result: Any,
-        exception: BaseException,
-        record_callback: Callable,
-    ) -> None:
-        super().__init__(str(exception))
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-        self.original_exception = exception
-        self.record_callback = record_callback
-        self._recorded = False
-
-    def record_and_raise(self) -> None:
-        """Record completion and raise the original exception."""
-        if not self._recorded:
-            self.record_callback(
-                self.func, self.args, self.kwargs, None, self.original_exception
-            )
-            self._recorded = True
-        raise self.original_exception from None
-
-
-class _CachedAsyncExecutionResult(AsyncExecutionResult):
-    """An AsyncExecutionResult that returns a cached value immediately."""
-
-    def __init__(self, cached_result: Any) -> None:
-        # Don't call super().__init__ as we don't need executor/func/args/kwargs
-        self._cached_result = cached_result
-
-    def __await__(self) -> Any:
-        """Return the cached result immediately.
-
-        This is a generator that yields nothing and returns the cached result.
-        """
-        if False:
-            yield  # Make this a generator function
-        return self._cached_result
-
-
-class _DurableAsyncExecutionResult(AsyncExecutionResult):
-    """An AsyncExecutionResult that records completion after execution."""
-
-    def __init__(
-        self, executor: Any, func: Callable, args: tuple, kwargs: dict
-    ) -> None:
-        super().__init__(executor, func, args, kwargs)
-
-    def __await__(self) -> Any:
-        """Execute and record completion when awaited."""
-        future = self._executor.submit(self._func, *self._args, **self._kwargs)
-        while not future.done():
-            yield
-        try:
-            result = future.result()
-        except _DurableExecutionException as exc:
-            # Record and re-raise the original exception for better diagnostics.
-            exc.record_and_raise()
-
-        # Handle the wrapped result/exception
-        if isinstance(result, _DurableExecutionResult):
-            return result.get_result()
-        elif isinstance(result, _DurableExecutionException):
-            error_message = (
-                "Unexpected _DurableExecutionException returned from executor; "
-                "it should have been raised via future.result()."
-            )
-            raise TypeError(error_message) from result.original_exception
-        else:
-            return result
-
-
-class _PendingFinalizeAsyncExecutionResult(AsyncExecutionResult):
-    """An AsyncExecutionResult that finalizes a matching pending slot on await."""
+    Recovery matching (pending-slot check, cached-result lookup, reconciler
+    planning) is deferred to ``__await__`` so that the Java‑side cursor is
+    never mutated before ``durable_execute_all_async`` has a chance to
+    coordinate the whole batch.  When the result is awaited individually,
+    the standard sequential recovery path is executed here; when it is
+    passed to ``durable_execute_all_async``, the raw fields are extracted
+    and the batch planner handles matching.
+    """
 
     def __init__(
         self,
@@ -225,59 +128,27 @@ class _PendingFinalizeAsyncExecutionResult(AsyncExecutionResult):
         func: Callable,
         args: tuple,
         kwargs: dict,
-    ) -> None:
-        super().__init__(executor, func, args, kwargs)
-        self._ctx = ctx
-
-    def __await__(self) -> Any:
-        future = self._executor.submit(self._func, *self._args, **self._kwargs)
-        while not future.done():
-            yield
-
-        exception = None
-        result = None
-        try:
-            result = future.result()
-        except BaseException as e:
-            exception = e
-
-        self._ctx._finalize_current_call(
-            self._func,
-            self._args,
-            self._kwargs,
-            result,
-            exception,
-        )
-
-        if exception is not None:
-            raise exception
-        return result
-
-
-class _ReconcilerDurableAsyncExecutionResult(AsyncExecutionResult):
-    """An AsyncExecutionResult that resolves reconciler state on await."""
-
-    def __init__(
-        self,
-        ctx: "FlinkRunnerContext",
-        executor: Any,
-        func: Callable,
-        args: tuple,
-        reconciler: Callable[[], Any],
-        kwargs: dict,
+        *,
+        reconciler: Callable[[], Any] | None = None,
+        durable_id: str | None = None,
     ) -> None:
         super().__init__(executor, func, args, kwargs)
         self._ctx = ctx
         self._reconciler = reconciler
+        self._durable_id = durable_id
 
     def __await__(self) -> Any:
+        if self._reconciler is not None:
+            return (yield from self._await_with_reconciler())
+        return (yield from self._await_completion_only())
+
+    def _await_with_reconciler(self) -> Any:
         plan = self._ctx._plan_reconciler_execution(
             self._func,
             self._args,
             self._reconciler,
             self._kwargs,
         )
-
         if plan.mode == "replay":
             result = self._ctx._replay_terminal_call(
                 self._func, self._args, self._kwargs
@@ -292,7 +163,6 @@ class _ReconcilerDurableAsyncExecutionResult(AsyncExecutionResult):
             self._args,
             self._kwargs,
         )
-
         future = self._executor.submit(plan.callable)
         while not future.done():
             yield
@@ -305,13 +175,58 @@ class _ReconcilerDurableAsyncExecutionResult(AsyncExecutionResult):
             exception = e
 
         self._ctx._finalize_current_call(
-            self._func,
-            self._args,
-            self._kwargs,
-            result,
-            exception,
+            self._func, self._args, self._kwargs, result, exception
         )
+        if exception is not None:
+            raise exception
+        return result
 
+    def _await_completion_only(self) -> Any:
+        if self._ctx._matches_current_pending_call(
+            self._func, self._args, self._kwargs
+        ):
+            future = self._executor.submit(
+                self._func, *self._args, **self._kwargs
+            )
+            while not future.done():
+                yield
+
+            exception = None
+            result = None
+            try:
+                result = future.result()
+            except BaseException as e:
+                exception = e
+
+            self._ctx._finalize_current_call(
+                self._func, self._args, self._kwargs, result, exception
+            )
+            if exception is not None:
+                raise exception
+            return result
+
+        is_hit, cached_result = self._ctx._try_get_cached_result(
+            self._func, self._args, self._kwargs
+        )
+        if is_hit:
+            return cached_result
+
+        future = self._executor.submit(
+            self._func, *self._args, **self._kwargs
+        )
+        while not future.done():
+            yield
+
+        exception = None
+        result = None
+        try:
+            result = future.result()
+        except BaseException as e:
+            exception = e
+
+        self._ctx._record_call_completion(
+            self._func, self._args, self._kwargs, result, exception
+        )
         if exception is not None:
             raise exception
         return result
@@ -749,12 +664,12 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
             A tuple of (is_hit, result_or_exception). If is_hit is True,
             the second element is the cached result or an exception to re-raise.
         """
-        function_id, args_digest = durable_identity_for_call(func, args, kwargs)
+        identity = durable_identity_for_call(func, args, kwargs)
 
         cached_exception: BaseException | None = None
         try:
             cached = self._j_runner_context.matchNextOrClearSubsequentCallResult(
-                function_id, args_digest
+                identity, ""
             )
             if cached is not None:
                 is_hit, result_payload, exception_payload = cached
@@ -802,14 +717,14 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         exception : BaseException | None
             The exception raised by the function (None if successful).
         """
-        function_id, args_digest = durable_identity_for_call(func, args, kwargs)
+        identity = durable_identity_for_call(func, args, kwargs)
 
         try:
             result_payload = None if exception else cloudpickle.dumps(result)
             exception_payload = cloudpickle.dumps(exception) if exception else None
 
             self._j_runner_context.recordCallCompletion(
-                function_id, args_digest, result_payload, exception_payload
+                identity, result_payload, exception_payload
             )
         except Exception as e:
             # If Java method doesn't exist, silently ignore
@@ -830,10 +745,9 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         if current is None:
             return None
 
-        function_id, args_digest, status, result_payload, exception_payload = current
+        function_id, status, result_payload, exception_payload = current
         return _PersistedCallResult(
             function_id=function_id,
-            args_digest=args_digest,
             status=status,
             result_payload=bytes(result_payload)
             if result_payload is not None
@@ -848,10 +762,9 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         if current is None:
             return None
 
-        function_id, args_digest, status, result_payload, exception_payload = current
+        function_id, status, result_payload, exception_payload = current
         return _PersistedCallResult(
             function_id=function_id,
-            args_digest=args_digest,
             status=status,
             result_payload=bytes(result_payload)
             if result_payload is not None
@@ -862,8 +775,8 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         )
 
     def _append_pending_call(self, func: Callable, args: tuple, kwargs: dict) -> None:
-        function_id, args_digest = durable_identity_for_call(func, args, kwargs)
-        self._j_runner_context.appendPendingCall(function_id, args_digest)
+        identity = durable_identity_for_call(func, args, kwargs)
+        self._j_runner_context.appendPendingCall(identity)
 
     def _finalize_current_call(
         self,
@@ -873,14 +786,14 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         result: Any,
         exception: BaseException | None,
     ) -> None:
-        function_id, args_digest = durable_identity_for_call(func, args, kwargs)
+        identity = durable_identity_for_call(func, args, kwargs)
         result_payload, exception_payload = self._serialize_call_payloads(
             result,
             exception,
         )
         self._j_runner_context.finalizeCurrentCall(
-            function_id,
-            args_digest,
+            identity,
+            "",
             result_payload,
             exception_payload,
         )
@@ -902,7 +815,7 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         reconciler: Callable[[], Any],
         kwargs: dict,
     ) -> _ReconcilerExecutionPlan:
-        function_id, args_digest = durable_identity_for_call(func, args, kwargs)
+        identity = durable_identity_for_call(func, args, kwargs)
         current = self._peek_current_call_result()
         durable_call = partial(func, *args, **kwargs)
 
@@ -913,7 +826,7 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
                 needs_append_pending=True,
             )
 
-        if current.function_id != function_id or current.args_digest != args_digest:
+        if current.function_id != identity:
             return _ReconcilerExecutionPlan(
                 "execute",
                 callable=durable_call,
@@ -947,12 +860,11 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         args: tuple,
         kwargs: dict,
     ) -> bool:
-        function_id, args_digest = durable_identity_for_call(func, args, kwargs)
+        identity = durable_identity_for_call(func, args, kwargs)
         current = self._peek_current_call_result()
         return (
             current is not None
-            and current.function_id == function_id
-            and current.args_digest == args_digest
+            and current.function_id == identity
             and current.status == "PENDING"
         )
 
@@ -1015,51 +927,16 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
 
         return self._execute_and_record_completion_only(func, args, kwargs)
 
-    def _wrap_completion_only_func(
-        self,
-        func: Callable,
-        args: tuple,
-        kwargs: dict,
-    ) -> Callable[..., Any]:
-        def record_call_completion(
-            call_func: Callable,
-            call_args: tuple,
-            call_kwargs: dict,
-            result: Any,
-            exception: BaseException | None,
-        ) -> None:
-            self._record_call_completion(
-                call_func,
-                call_args,
-                call_kwargs,
-                result,
-                exception,
-            )
 
-        def wrapped_func(*a: Any, **kw: Any) -> Any:
-            exception = None
-            result = None
-            try:
-                result = func(*a, **kw)
-            except BaseException as e:
-                exception = e
-
-            if exception:
-                raise _DurableExecutionException(
-                    func, args, kwargs, result, exception, record_call_completion
-                )
-            return _DurableExecutionResult(
-                func, args, kwargs, result, record_call_completion
-            )
-
-        return wrapped_func
-
-    def _durable_identity(self, call: DurableCall) -> tuple[str, str]:
-        return durable_identity_for_call(call.func, call.args, call.kwargs)
+    def _durable_identity(self, call: DurableCall) -> str:
+        func = call.func
+        if call.durable_id is not None:
+            func = with_durable_id(func, call.durable_id)
+        return durable_identity_for_call(func, call.args, call.kwargs)
 
     def _call_matches(self, current: _PersistedCallResult, call: DurableCall) -> bool:
-        function_id, args_digest = self._durable_identity(call)
-        return current.function_id == function_id and current.args_digest == args_digest
+        identity = self._durable_identity(call)
+        return current.function_id == identity
 
     def _read_terminal_outcome(self, current: _PersistedCallResult) -> Outcome:
         try:
@@ -1083,7 +960,7 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         execution_start = -1
 
         for index, call in enumerate(calls):
-            function_id, args_digest = self._durable_identity(call)
+            identity = self._durable_identity(call)
             current = self._read_call_result_at(base + index)
             if current is None:
                 needs_reservation = True
@@ -1122,12 +999,10 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
 
         if needs_reservation:
             function_ids = []
-            args_digests = []
             for call in calls[execution_start:]:
-                function_id, args_digest = self._durable_identity(call)
-                function_ids.append(function_id)
-                args_digests.append(args_digest)
-            self._j_runner_context.reservePendingBatch(function_ids, args_digests)
+                identity = self._durable_identity(call)
+                function_ids.append(identity)
+            self._j_runner_context.reservePendingBatch(function_ids)
 
         return _BatchExecutionPlan(
             outcomes=outcomes,
@@ -1149,7 +1024,7 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
             zip(plan.suppliers, executed, strict=True)
         ):
             call = calls[call_index]
-            function_id, args_digest = self._durable_identity(call)
+            identity = self._durable_identity(call)
             if not started[i]:
                 outcomes[call_index] = outcome
                 continue
@@ -1160,8 +1035,7 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
                 )
                 self._j_runner_context.finalizeCallAt(
                     base + call_index,
-                    function_id,
-                    args_digest,
+                    identity,
                     result_payload,
                     exception_payload,
                 )
@@ -1173,10 +1047,21 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
 
     @override
     def durable_execute_all_async(
-        self,
-        callables: list[DurableCall],
+        self, *awaitables: AsyncExecutionResult
     ) -> AsyncExecutionResult:
-        return _DurableBatchAsyncExecutionResult(self, callables)
+        calls = []
+        for awaitable in awaitables:
+            kwargs = awaitable._kwargs
+            calls.append(
+                DurableCall(
+                    func=awaitable._func,
+                    args=awaitable._args,
+                    kwargs=kwargs,
+                    reconciler=getattr(awaitable, "_reconciler", None),
+                    durable_id=getattr(awaitable, "_durable_id", None),
+                )
+            )
+        return _DurableBatchAsyncExecutionResult(self, calls)
 
     @override
     def durable_execute(
@@ -1245,34 +1130,14 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         if durable_id is not None:
             func = with_durable_id(func, durable_id)
 
-        if validated_reconciler is not None:
-            return _ReconcilerDurableAsyncExecutionResult(
-                self,
-                self.executor,
-                func,
-                args,
-                validated_reconciler,
-                kwargs,
-            )
-
-        if self._matches_current_pending_call(func, args, kwargs):
-            return _PendingFinalizeAsyncExecutionResult(
-                self,
-                self.executor,
-                func,
-                args,
-                kwargs,
-            )
-
-        is_hit, cached_result = self._try_get_cached_result(func, args, kwargs)
-        if is_hit:
-            return _CachedAsyncExecutionResult(cached_result)
-
-        return _DurableAsyncExecutionResult(
+        return _DeferredDurableAsyncExecutionResult(
+            self,
             self.executor,
-            self._wrap_completion_only_func(func, args, kwargs),
+            func,
             args,
             kwargs,
+            reconciler=validated_reconciler,
+            durable_id=durable_id,
         )
 
     @property

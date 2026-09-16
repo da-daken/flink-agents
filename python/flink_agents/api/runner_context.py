@@ -25,7 +25,7 @@ from flink_agents.api.memory.long_term_memory import BaseLongTermMemory
 from flink_agents.api.metric_group import MetricGroup
 from flink_agents.api.resource import Resource, ResourceType
 
-__all__ = ["AsyncExecutionResult", "DurableCall", "Outcome", "RunnerContext"]
+__all__ = ["AsyncExecutionResult", "Outcome", "RunnerContext"]
 
 if TYPE_CHECKING:
     from flink_agents.api.memory_object import MemoryObject
@@ -39,6 +39,7 @@ class DurableCall:
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] | None = None
     reconciler: Callable[[], Any] | None = None
+    durable_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -369,14 +370,25 @@ class RunnerContext(ABC):
 
     @abstractmethod
     def durable_execute_all_async(
-        self,
-        callables: list[DurableCall],
+        self, *awaitables: "AsyncExecutionResult"
     ) -> "AsyncExecutionResult":
-        """Execute multiple durable callables as one asynchronous durable batch.
+        """Execute multiple durable calls as one asynchronous durable batch.
 
-        The returned awaitable resolves to a list of ``Outcome`` values in the
-        same order as the input calls. Individual callable exceptions are returned
-        as failure outcomes instead of failing the whole batch.
+        Each argument must be an ``AsyncExecutionResult`` returned by
+        ``durable_execute_async``. The returned awaitable resolves to a list of
+        ``Outcome`` values in the same order as the input calls. Individual
+        callable exceptions are returned as failure outcomes instead of failing
+        the whole batch.
+
+        Usage::
+
+            outcomes = await ctx.durable_execute_all_async(
+                ctx.durable_execute_async(foo, arg1, durable_id="foo-1"),
+                ctx.durable_execute_async(bar, arg2, durable_id="bar-1"),
+            )
+            for outcome in outcomes:
+                if outcome.is_success():
+                    process(outcome.value)
         """
 
     @property

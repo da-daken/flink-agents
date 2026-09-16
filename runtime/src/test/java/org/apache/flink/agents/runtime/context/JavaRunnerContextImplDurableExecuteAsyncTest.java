@@ -125,7 +125,7 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
         InspectingContinuationActionExecutor executor = new InspectingContinuationActionExecutor();
         ActionState actionState = new ActionState(null);
         actionState.addCallResult(
-                new CallResult("recon-async", "", OBJECT_MAPPER.writeValueAsBytes("cached")));
+                new CallResult("recon-async", OBJECT_MAPPER.writeValueAsBytes("cached")));
         JavaRunnerContextImpl context = createContext(actionState, executor);
         TestReconcilableCallable<String> callable =
                 new TestReconcilableCallable<>(
@@ -147,7 +147,7 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
     void testDurableExecuteAsyncReconcilableReconcileSuccess() throws Exception {
         InspectingContinuationActionExecutor executor = new InspectingContinuationActionExecutor();
         ActionState actionState = new ActionState(null);
-        actionState.addCallResult(CallResult.pending("recon-async", ""));
+        actionState.addCallResult(CallResult.pending("recon-async"));
         JavaRunnerContextImpl context = createContext(actionState, executor);
         TestReconcilableCallable<String> callable =
                 new TestReconcilableCallable<>(
@@ -172,7 +172,7 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
     void testDurableExecuteAsyncReconcilableReconcileExceptionPersistsFailure() throws Exception {
         InspectingContinuationActionExecutor executor = new InspectingContinuationActionExecutor();
         ActionState actionState = new ActionState(null);
-        actionState.addCallResult(CallResult.pending("recon-async", ""));
+        actionState.addCallResult(CallResult.pending("recon-async"));
         JavaRunnerContextImpl context = createContext(actionState, executor);
         executor.setBeforeExecute(
                 () -> {
@@ -212,7 +212,7 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
     void testDurableExecuteAsyncCompletionOnlyReExecutesPendingSlot() throws Exception {
         InspectingContinuationActionExecutor executor = new InspectingContinuationActionExecutor();
         ActionState actionState = new ActionState(null);
-        actionState.addCallResult(CallResult.pending("tool-call", ""));
+        actionState.addCallResult(CallResult.pending("tool-call"));
         JavaRunnerContextImpl context = createContext(actionState, executor);
         TestDurableCallable<String> callable =
                 new TestDurableCallable<>("tool-call", String.class, () -> "recovered");
@@ -261,7 +261,7 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
     void testDurableExecuteAllAsyncReconcilesPendingSlot() throws Exception {
         InspectingContinuationActionExecutor executor = new InspectingContinuationActionExecutor();
         ActionState actionState = new ActionState(null);
-        actionState.addCallResult(CallResult.pending("batch-1", ""));
+        actionState.addCallResult(CallResult.pending("batch-1"));
         JavaRunnerContextImpl context = createContext(actionState, executor);
         TestReconcilableCallable<String> callable =
                 new TestReconcilableCallable<>(
@@ -286,10 +286,10 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
         InspectingContinuationActionExecutor executor = new InspectingContinuationActionExecutor();
         ActionState actionState = new ActionState(null);
         actionState.addCallResult(
-                new CallResult("batch-1", "", OBJECT_MAPPER.writeValueAsBytes("cached-one")));
+                new CallResult("batch-1", OBJECT_MAPPER.writeValueAsBytes("cached-one")));
         actionState.addCallResult(
-                new CallResult("batch-2", "", OBJECT_MAPPER.writeValueAsBytes("cached-two")));
-        actionState.addCallResult(CallResult.pending("batch-3", ""));
+                new CallResult("batch-2", OBJECT_MAPPER.writeValueAsBytes("cached-two")));
+        actionState.addCallResult(CallResult.pending("batch-3"));
         JavaRunnerContextImpl context = createContext(actionState, executor);
         TestDurableCallable<String> first =
                 new TestDurableCallable<>(
@@ -324,7 +324,6 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
         actionState.addCallResult(
                 new CallResult(
                         "batch-1",
-                        "",
                         null,
                         OBJECT_MAPPER.writeValueAsBytes(
                                 RunnerContextImpl.DurableExecutionException.fromException(
@@ -352,7 +351,6 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
         actionState.addCallResult(
                 new CallResult(
                         "batch-1",
-                        "",
                         "not-valid-json".getBytes(java.nio.charset.StandardCharsets.UTF_8),
                         null));
         JavaRunnerContextImpl context = createContext(actionState, executor);

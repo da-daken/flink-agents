@@ -16,7 +16,7 @@
 # limitations under the License.
 #################################################################################
 import asyncio
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import MagicMock
 
 from flink_agents.api.core_options import AgentExecutionOptions
@@ -62,12 +62,33 @@ def _expected_durable_function_id(
     tenant_id: str = "tenant-1",
 ) -> str:
     tool = _query_order_tool()
-    function_id, _ = durable_identity_for_call(
+    function_id = durable_identity_for_call(
         tool.call,
         (),
         {"order_id": order_id, "tenant_id": tenant_id},
     )
     return function_id
+
+
+class _FakeAsyncExecutionResult:
+    __slots__ = ("_func", "_args", "_kwargs", "_result")
+
+    def __init__(
+        self,
+        func: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        result: Any,
+    ) -> None:
+        self._func = func
+        self._args = args
+        self._kwargs = kwargs
+        self._result = result
+
+    def __await__(self) -> Any:
+        if False:
+            yield
+        return self._result
 
 
 class _Context:
@@ -108,17 +129,20 @@ class _Context:
         self.durable_execute_calls.append((func, args, kwargs))
         return func(*args, **kwargs)
 
-    async def durable_execute_async(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+    def durable_execute_async(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         self.durable_execute_async_calls.append((func, args, kwargs))
-        return func(*args, **kwargs)
+        result = func(*args, **kwargs)
+        return _FakeAsyncExecutionResult(func, args, kwargs, result)
 
-    async def durable_execute_all_async(self, callables: list[Any]) -> list[Outcome]:
-        self.durable_execute_all_async_calls.append(callables)
+    async def durable_execute_all_async(self, *awaitables: Any) -> list[Outcome]:
+        self.durable_execute_all_async_calls.append(awaitables)
         if self.durable_execute_all_async_outcomes is not None:
             return self.durable_execute_all_async_outcomes
         return [
-            Outcome.success(call.func(*call.args, **(call.kwargs or {})))
-            for call in callables
+            Outcome.success(
+                awaitable._func(*awaitable._args, **(awaitable._kwargs or {}))
+            )
+            for awaitable in awaitables
         ]
 
     def send_event(self, event: Any) -> None:
@@ -358,15 +382,19 @@ def test_tool_call_action_uses_parallel_batch_for_multiple_tools() -> None:
     }
     assert response.success == {"call-1": True, "call-2": True}
     assert len(ctx.durable_execute_all_async_calls) == 1
-    expected_id = _expected_durable_function_id("order-call-1")
+    expected_call1 = _expected_durable_function_id("order-call-1")
+    expected_call2 = _expected_durable_function_id("order-call-2")
     assert [
-        durable_identity_for_call(call.func, call.args, call.kwargs)[0]
-        for call in ctx.durable_execute_all_async_calls[0]
+        durable_identity_for_call(
+            awaitable._func,
+            awaitable._args,
+            awaitable._kwargs,
+        )
+        for awaitable in ctx.durable_execute_all_async_calls[0]
     ] == [
-        expected_id,
-        expected_id,
+        expected_call1,
+        expected_call2,
     ]
-    assert ctx.durable_execute_async_calls == []
 
 
 def test_tool_call_action_uses_serial_async_when_parallelism_is_one() -> None:
@@ -481,7 +509,7 @@ def test_tool_call_action_records_infrastructure_failure_for_all_parallel_tools(
 ):
     class _FailingBatchContext(_Context):
         async def durable_execute_all_async(
-            self, callables: list[Any]
+            self, *awaitables: Any
         ) -> list[Outcome]:
             msg = "persist failed"
             raise RuntimeError(msg)

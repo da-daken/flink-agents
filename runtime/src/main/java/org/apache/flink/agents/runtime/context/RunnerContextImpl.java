@@ -514,16 +514,14 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
     protected <T> T durableExecuteCompletionOnly(
             DurableCallable<T> durableCallable, Callable<T> executionCallable) throws Exception {
         String functionId = durableCallable.getId();
-        // argsDigest is empty because DurableCallable encapsulates all arguments internally
-        String argsDigest = "";
 
         CallResult current = getCurrentCallResult();
-        if (current != null && current.matches(functionId, argsDigest) && current.isPending()) {
-            return executeAndFinalizeCurrentCall(functionId, argsDigest, executionCallable);
+        if (current != null && current.matches(functionId) && current.isPending()) {
+            return executeAndFinalizeCurrentCall(functionId, executionCallable);
         }
 
         Optional<T> cachedResult =
-                tryGetCachedResult(functionId, argsDigest, durableCallable.getResultClass());
+                tryGetCachedResult(functionId, durableCallable.getResultClass());
         if (cachedResult.isPresent()) {
             return cachedResult.get();
         }
@@ -542,7 +540,7 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
             exception = e;
         }
 
-        recordDurableCompletion(functionId, argsDigest, result, exception);
+        recordDurableCompletion(functionId, result, exception);
 
         if (exception != null) {
             throw exception;
@@ -647,15 +645,13 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
      * <p>This method delegates to the {@link DurableExecutionContext} if present.
      *
      * @param functionId the function identifier
-     * @param argsDigest the digest of serialized arguments
      * @return array containing [isHit (boolean), resultPayload (byte[]), exceptionPayload
      *     (byte[])], or null if miss or durable execution is not enabled
      */
-    public Object[] matchNextOrClearSubsequentCallResult(String functionId, String argsDigest) {
+    public Object[] matchNextOrClearSubsequentCallResult(String functionId) {
         mailboxThreadChecker.run();
         if (durableExecutionContext != null) {
-            return durableExecutionContext.matchNextOrClearSubsequentCallResult(
-                    functionId, argsDigest);
+            return durableExecutionContext.matchNextOrClearSubsequentCallResult(functionId);
         }
         return null;
     }
@@ -666,54 +662,51 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
      * <p>This method delegates to the {@link DurableExecutionContext} if present.
      *
      * @param functionId the function identifier
-     * @param argsDigest the digest of serialized arguments
      * @param resultPayload the serialized result (null if exception)
      * @param exceptionPayload the serialized exception (null if success)
      */
     public void recordCallCompletion(
-            String functionId, String argsDigest, byte[] resultPayload, byte[] exceptionPayload) {
+            String functionId, byte[] resultPayload, byte[] exceptionPayload) {
         mailboxThreadChecker.run();
         if (durableExecutionContext != null) {
             durableExecutionContext.recordCallCompletion(
-                    functionId, argsDigest, resultPayload, exceptionPayload);
+                    functionId, resultPayload, exceptionPayload);
         }
     }
 
     /** Appends a pending durable call slot at the current call index. */
-    public void appendPendingCall(String functionId, String argsDigest) {
+    public void appendPendingCall(String functionId) {
         mailboxThreadChecker.run();
         if (durableExecutionContext != null) {
-            durableExecutionContext.appendPendingCall(functionId, argsDigest);
+            durableExecutionContext.appendPendingCall(functionId);
         }
     }
 
-    public void reservePendingBatch(List<String> functionIds, List<String> argsDigests) {
+    public void reservePendingBatch(List<String> functionIds) {
         mailboxThreadChecker.run();
         if (durableExecutionContext != null && !functionIds.isEmpty()) {
-            durableExecutionContext.reservePendingBatch(functionIds, argsDigests);
+            durableExecutionContext.reservePendingBatch(functionIds);
         }
     }
 
     /** Finalizes the pending durable call slot at the current call index. */
     public void finalizeCurrentCall(
-            String functionId, String argsDigest, byte[] resultPayload, byte[] exceptionPayload) {
+            String functionId, byte[] resultPayload, byte[] exceptionPayload) {
         mailboxThreadChecker.run();
         if (durableExecutionContext != null) {
-            durableExecutionContext.finalizeCurrentCall(
-                    functionId, argsDigest, resultPayload, exceptionPayload);
+            durableExecutionContext.finalizeCurrentCall(functionId, resultPayload, exceptionPayload);
         }
     }
 
     public void finalizeCallAt(
             int index,
             String functionId,
-            String argsDigest,
             byte[] resultPayload,
             byte[] exceptionPayload) {
         mailboxThreadChecker.run();
         if (durableExecutionContext != null) {
             durableExecutionContext.finalizeCallAt(
-                    index, functionId, argsDigest, resultPayload, exceptionPayload);
+                    index, functionId, resultPayload, exceptionPayload);
         }
     }
 
@@ -756,7 +749,6 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
         }
         return new Object[] {
             current.getFunctionId(),
-            current.getArgsDigest(),
             current.isPending() ? "PENDING" : current.isFailure() ? "FAILED" : "SUCCEEDED",
             current.getResultPayload(),
             current.getExceptionPayload()
@@ -775,15 +767,15 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
     }
 
     protected <T> Outcome<T> readTerminalOutcomeAt(
-            int index, String functionId, String argsDigest, Class<T> resultClass)
+            int index, String functionId, Class<T> resultClass)
             throws Exception {
         CallResult callResult = getCallResultAt(index);
         if (callResult == null || callResult.isPending()) {
             throw new IllegalStateException(
                     String.format(
                             "Expected a terminal durable call result at index %s for "
-                                    + "functionId=%s, argsDigest=%s",
-                            index, functionId, argsDigest));
+                                    + "functionId=%s",
+                            index, functionId));
         }
         try {
             if (callResult.getExceptionPayload() != null) {
@@ -818,9 +810,9 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
         return null;
     }
 
-    protected <T> Optional<T> tryGetCachedResult(
-            String functionId, String argsDigest, Class<T> resultClass) throws Exception {
-        Object[] cached = matchNextOrClearSubsequentCallResult(functionId, argsDigest);
+    protected <T> Optional<T> tryGetCachedResult(String functionId, Class<T> resultClass)
+            throws Exception {
+        Object[] cached = matchNextOrClearSubsequentCallResult(functionId);
         if (cached != null && (Boolean) cached[0]) {
             byte[] resultPayload = (byte[]) cached[1];
             byte[] exceptionPayload = (byte[]) cached[2];
@@ -839,11 +831,10 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
     }
 
     protected void recordDurableCompletion(
-            String functionId, String argsDigest, Object result, Exception exception)
-            throws Exception {
+            String functionId, Object result, Exception exception) throws Exception {
         byte[] resultPayload = serializeDurableResult(result);
         byte[] exceptionPayload = serializeDurableException(exception);
-        recordCallCompletion(functionId, argsDigest, resultPayload, exceptionPayload);
+        recordCallCompletion(functionId, resultPayload, exceptionPayload);
     }
 
     /**
@@ -862,41 +853,39 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
             Callable<T> executionCallable)
             throws Exception {
         String functionId = durableCallable.getId();
-        String argsDigest = "";
         Preconditions.checkState(
                 durableExecutionContext != null, "durableExecutionContext must not be null");
 
         CallResult current = getCurrentCallResult();
 
         if (current == null) {
-            appendPendingCall(functionId, argsDigest);
-            return executeAndFinalizeCurrentCall(functionId, argsDigest, executionCallable);
+            appendPendingCall(functionId);
+            return executeAndFinalizeCurrentCall(functionId, executionCallable);
         }
 
-        if (!current.matches(functionId, argsDigest)) {
+        if (!current.matches(functionId)) {
             clearCallResultsFromCurrentIndexAndPersist();
-            appendPendingCall(functionId, argsDigest);
-            return executeAndFinalizeCurrentCall(functionId, argsDigest, executionCallable);
+            appendPendingCall(functionId);
+            return executeAndFinalizeCurrentCall(functionId, executionCallable);
         }
 
         if (!current.isPending()) {
             Optional<T> cachedResult =
-                    tryGetCachedResult(functionId, argsDigest, durableCallable.getResultClass());
+                    tryGetCachedResult(functionId, durableCallable.getResultClass());
             if (cachedResult.isPresent()) {
                 return cachedResult.get();
             }
             throw new IllegalStateException(
                     String.format(
-                            "Expected a terminal durable call result at index %s for "
-                                    + "functionId=%s, argsDigest=%s",
-                            durableExecutionContext.getCurrentCallIndex(), functionId, argsDigest));
+                            "Expected a terminal durable call result at index %s for functionId=%s",
+                            durableExecutionContext.getCurrentCallIndex(), functionId));
         }
 
-        return executeAndFinalizeCurrentCall(functionId, argsDigest, reconcileCallable);
+        return executeAndFinalizeCurrentCall(functionId, reconcileCallable);
     }
 
     protected <T> T executeAndFinalizeCurrentCall(
-            String functionId, String argsDigest, Callable<T> callSupplier) throws Exception {
+            String functionId, Callable<T> callSupplier) throws Exception {
         T result = null;
         Exception exception = null;
         try {
@@ -913,7 +902,6 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
 
         finalizeCurrentCall(
                 functionId,
-                argsDigest,
                 serializeDurableResult(result),
                 serializeDurableException(exception));
 
@@ -1013,28 +1001,25 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
          * detected.
          *
          * @param functionId the function identifier
-         * @param argsDigest the digest of serialized arguments
          * @return array containing [isHit, resultPayload, exceptionPayload], or null if miss
          */
-        public Object[] matchNextOrClearSubsequentCallResult(String functionId, String argsDigest) {
+        public Object[] matchNextOrClearSubsequentCallResult(String functionId) {
             if (currentCallIndex < recoveryCallResults.size()) {
                 CallResult result = recoveryCallResults.get(currentCallIndex);
 
-                if (result.matches(functionId, argsDigest)) {
+                if (result.matches(functionId)) {
                     if (result.isPending()) {
                         LOG.debug(
                                 "Pending CallResult at index {} treated as cache miss: "
-                                        + "functionId={}, argsDigest={}",
+                                        + "functionId={}",
                                 currentCallIndex,
-                                functionId,
-                                argsDigest);
+                                functionId);
                         return null;
                     }
                     LOG.debug(
-                            "CallResult hit at index {}: functionId={}, argsDigest={}",
+                            "CallResult hit at index {}: functionId={}",
                             currentCallIndex,
-                            functionId,
-                            argsDigest);
+                            functionId);
                     currentCallIndex++;
                     return new Object[] {
                         true, result.getResultPayload(), result.getExceptionPayload()
@@ -1042,13 +1027,11 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
                 } else {
                     LOG.warn(
                             "Non-deterministic call detected at index {}: expected functionId={}, "
-                                    + "argsDigest={}, but got functionId={}, argsDigest={}. "
+                                    + "but got functionId={}. "
                                     + "Clearing subsequent results.",
                             currentCallIndex,
                             result.getFunctionId(),
-                            result.getArgsDigest(),
-                            functionId,
-                            argsDigest);
+                            functionId);
                     clearCallResultsFromCurrentIndex();
                 }
             }
@@ -1059,27 +1042,24 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
          * Records a completed call and persists the ActionState.
          *
          * @param functionId the function identifier
-         * @param argsDigest the digest of serialized arguments
          * @param resultPayload the serialized result (null if exception)
          * @param exceptionPayload the serialized exception (null if success)
          */
         public void recordCallCompletion(
                 String functionId,
-                String argsDigest,
                 byte[] resultPayload,
                 byte[] exceptionPayload) {
             CallResult callResult =
-                    new CallResult(functionId, argsDigest, resultPayload, exceptionPayload);
+                    new CallResult(functionId, resultPayload, exceptionPayload);
 
             actionState.addCallResult(callResult);
             recoveryCallResults.add(callResult);
             persistActionState();
 
             LOG.debug(
-                    "Recorded and persisted CallResult at index {}: functionId={}, argsDigest={}",
+                    "Recorded and persisted CallResult at index {}: functionId={}",
                     currentCallIndex,
-                    functionId,
-                    argsDigest);
+                    functionId);
 
             currentCallIndex++;
         }
@@ -1090,7 +1070,7 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
          * <p>This reserves the current slot for a reconcilable durable call but does not advance
          * {@code currentCallIndex}.
          */
-        public void appendPendingCall(String functionId, String argsDigest) {
+        public void appendPendingCall(String functionId) {
             if (currentCallIndex != recoveryCallResults.size()) {
                 throw new IllegalStateException(
                         String.format(
@@ -1099,28 +1079,20 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
                                 currentCallIndex));
             }
 
-            CallResult pending = CallResult.pending(functionId, argsDigest);
+            CallResult pending = CallResult.pending(functionId);
             actionState.addCallResult(pending);
             recoveryCallResults.add(pending);
             persistActionState();
 
             LOG.debug(
-                    "Recorded and persisted pending CallResult at index {}: functionId={}, "
-                            + "argsDigest={}",
+                    "Recorded and persisted pending CallResult at index {}: functionId={}",
                     currentCallIndex,
-                    functionId,
-                    argsDigest);
+                    functionId);
         }
 
-        public void reservePendingBatch(List<String> functionIds, List<String> argsDigests) {
-            if (functionIds.size() != argsDigests.size()) {
-                throw new IllegalArgumentException(
-                        String.format(
-                                "functionIds size (%s) must match argsDigests size (%s)",
-                                functionIds.size(), argsDigests.size()));
-            }
+        public void reservePendingBatch(List<String> functionIds) {
             for (int i = 0; i < functionIds.size(); i++) {
-                CallResult pending = CallResult.pending(functionIds.get(i), argsDigests.get(i));
+                CallResult pending = CallResult.pending(functionIds.get(i));
                 actionState.addCallResult(pending);
                 recoveryCallResults.add(pending);
             }
@@ -1133,18 +1105,16 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
          */
         public void finalizeCurrentCall(
                 String functionId,
-                String argsDigest,
                 byte[] resultPayload,
                 byte[] exceptionPayload) {
             finalizeCallAt(
-                    currentCallIndex, functionId, argsDigest, resultPayload, exceptionPayload);
+                    currentCallIndex, functionId, resultPayload, exceptionPayload);
             currentCallIndex++;
         }
 
         public void finalizeCallAt(
                 int index,
                 String functionId,
-                String argsDigest,
                 byte[] resultPayload,
                 byte[] exceptionPayload) {
             CallResult current = getCallResultAt(index);
@@ -1154,11 +1124,11 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
                                 "Cannot finalize call at index %s because no persisted slot exists",
                                 index));
             }
-            if (!current.matches(functionId, argsDigest)) {
+            if (!current.matches(functionId)) {
                 throw new IllegalStateException(
                         String.format(
-                                "Cannot finalize call at index %s because the persisted slot does not match functionId=%s, argsDigest=%s",
-                                index, functionId, argsDigest));
+                                "Cannot finalize call at index %s because the persisted slot does not match functionId=%s",
+                                index, functionId));
             }
             if (!current.isPending()) {
                 throw new IllegalStateException(
@@ -1168,16 +1138,15 @@ public class RunnerContextImpl implements RunnerContext, ExecutionReporter {
             }
 
             CallResult terminal =
-                    new CallResult(functionId, argsDigest, resultPayload, exceptionPayload);
+                    new CallResult(functionId, resultPayload, exceptionPayload);
             actionState.replaceCallResult(index, terminal);
             recoveryCallResults.set(index, terminal);
             persistActionState();
 
             LOG.debug(
-                    "Finalized and persisted CallResult at index {}: functionId={}, argsDigest={}",
+                    "Finalized and persisted CallResult at index {}: functionId={}",
                     index,
-                    functionId,
-                    argsDigest);
+                    functionId);
         }
 
         public void advanceCallIndexBy(int count) {

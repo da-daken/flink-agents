@@ -284,11 +284,11 @@ def test_cloudpickle_none_exception_message() -> None:
 
 
 def test_with_durable_id_overrides_derived_function_id() -> None:
-    """An explicit durable id wins over the derived module/qualname id."""
+    """An explicit durable id is returned as the authoritative identity."""
     wrapped = with_durable_id(sample_function, "session-1#call-1")
 
     assert get_durable_id(wrapped) == "session-1#call-1"
-    assert _compute_function_id(wrapped) == "session-1#call-1"
+    assert durable_identity_for_call(wrapped, (), None) == "session-1#call-1"
     # The wrapper stays invocable and does not mutate the original callable.
     assert wrapped(1, 2) == 3
     assert get_durable_id(sample_function) is None
@@ -303,14 +303,11 @@ def test_get_durable_id_returns_none_for_plain_callables() -> None:
 
 
 def test_durable_identity_with_explicit_id_matches_on_id_alone() -> None:
-    """An explicit durable id is the authoritative identity with an empty digest."""
+    """An explicit durable id is the authoritative recovery identity."""
     wrapped = with_durable_id(sample_function, "session-1#call-1")
 
-    assert durable_identity_for_call(wrapped, (1, 2), None) == ("session-1#call-1", "")
-    assert durable_identity_for_call(wrapped, (), {"x": 1, "y": 2}) == (
-        "session-1#call-1",
-        "",
-    )
+    assert durable_identity_for_call(wrapped, (1, 2), None) == "session-1#call-1"
+    assert durable_identity_for_call(wrapped, (), {"x": 1, "y": 2}) == "session-1#call-1"
 
 
 def test_durable_identity_with_explicit_id_ignores_argument_changes() -> None:
@@ -328,12 +325,13 @@ def test_durable_identity_with_explicit_id_ignores_argument_changes() -> None:
 
 
 def test_durable_identity_without_id_derives_function_id_and_digest() -> None:
-    """Without an explicit id, identity is derived from qualname plus args digest."""
+    """Without an explicit id, identity encodes qualname plus args digest."""
     identity = durable_identity_for_call(sample_function, (1, 2), None)
 
+    expected_function_id = _compute_function_id(sample_function)
     expected_digest = _compute_args_digest((1, 2), {})
-    assert identity == (_compute_function_id(sample_function), expected_digest)
-    assert identity[1] != ""
+    assert identity == f"{expected_function_id}#{expected_digest}"
+    assert expected_digest in identity
 
     other_args = durable_identity_for_call(sample_function, (3, 4), None)
     assert other_args != identity
