@@ -28,9 +28,11 @@ _DURABLE_ID_ATTR = "__flink_agents_durable_id__"
 def with_durable_id(func: Callable, durable_id: str) -> Callable:
     """Wrap ``func`` so durable execution keys it by ``durable_id``.
 
-    Callers that own a stable identity for a durable call attach it here
-    instead of relying on the module/qualname of the callable, which is
-    shared by every call issued from the same implementation.
+    The explicit id is the authoritative recovery identity: recovery matches
+    on the id alone and the arguments are not fingerprinted. Callers owning
+    an explicit id must guarantee that the same id always denotes the same
+    logical call. Without a wrapper, the identity is derived from the
+    callable's module/qualname plus a digest of its arguments.
     """
 
     @functools.wraps(func)
@@ -55,7 +57,18 @@ def durable_identity_for_call(
     args: tuple,
     kwargs: dict | None,
 ) -> tuple[str, str]:
-    """Return the durable journal identity for a single callable invocation."""
+    """Return the durable journal identity for a single callable invocation.
+
+    An explicit id attached by :func:`with_durable_id` is the authoritative
+    recovery identity: the returned args digest is empty, so recovery matches
+    on the id alone. Callers owning an explicit id must guarantee that the
+    same id always denotes the same logical call, because diverging arguments
+    are not detected. Without an explicit id, the identity is derived from the
+    callable's module/qualname plus a digest of the serialized arguments.
+    """
+    explicit_id = get_durable_id(func)
+    if explicit_id is not None:
+        return explicit_id, ""
     call_kwargs = kwargs or {}
     return _compute_function_id(func), _compute_args_digest(args, call_kwargs)
 

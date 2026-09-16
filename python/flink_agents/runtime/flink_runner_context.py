@@ -47,8 +47,6 @@ from flink_agents.api.runner_context import (
 )
 from flink_agents.api.trace import ExecutionReporter
 from flink_agents.runtime.durable_execution import (
-    _compute_args_digest,
-    _compute_function_id,
     _validate_reconciler_callable,
     durable_identity_for_call,
     with_durable_id,
@@ -864,10 +862,8 @@ class FlinkRunnerContext(RunnerContext, ExecutionReporter):
         )
 
     def _append_pending_call(self, func: Callable, args: tuple, kwargs: dict) -> None:
-        self._j_runner_context.appendPendingCall(
-            _compute_function_id(func),
-            _compute_args_digest(args, kwargs),
-        )
+        function_id, args_digest = durable_identity_for_call(func, args, kwargs)
+        self._j_runner_context.appendPendingCall(function_id, args_digest)
 
     def _finalize_current_call(
         self,

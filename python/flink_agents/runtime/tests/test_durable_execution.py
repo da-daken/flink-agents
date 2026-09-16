@@ -24,6 +24,7 @@ from flink_agents.runtime.durable_execution import (
     _compute_args_digest,
     _compute_function_id,
     _validate_reconciler_callable,
+    durable_identity_for_call,
     get_durable_id,
     with_durable_id,
 )
@@ -299,3 +300,47 @@ def test_get_durable_id_returns_none_for_plain_callables() -> None:
     derived = _compute_function_id(sample_function)
     assert derived == _compute_function_id(sample_function)
     assert "sample_function" in derived
+
+
+def test_durable_identity_with_explicit_id_matches_on_id_alone() -> None:
+    """An explicit durable id is the authoritative identity with an empty digest."""
+    wrapped = with_durable_id(sample_function, "session-1#call-1")
+
+    assert durable_identity_for_call(wrapped, (1, 2), None) == ("session-1#call-1", "")
+    assert durable_identity_for_call(wrapped, (), {"x": 1, "y": 2}) == (
+        "session-1#call-1",
+        "",
+    )
+
+
+def test_durable_identity_with_explicit_id_ignores_argument_changes() -> None:
+    """Diverging arguments under the same explicit id keep the same identity.
+
+    Recovery therefore replays the persisted outcome instead of detecting the
+    drift; callers own the guarantee that the same id denotes the same
+    logical call.
+    """
+    wrapped = with_durable_id(sample_function, "session-1#call-1")
+
+    first = durable_identity_for_call(wrapped, (1, 2), None)
+    second = durable_identity_for_call(wrapped, (3, 4), None)
+    assert first == second
+
+
+def test_durable_identity_without_id_derives_function_id_and_digest() -> None:
+    """Without an explicit id, identity is derived from qualname plus args digest."""
+    identity = durable_identity_for_call(sample_function, (1, 2), None)
+
+    expected_digest = _compute_args_digest((1, 2), {})
+    assert identity == (_compute_function_id(sample_function), expected_digest)
+    assert identity[1] != ""
+
+    other_args = durable_identity_for_call(sample_function, (3, 4), None)
+    assert other_args != identity
+
+
+def test_durable_identity_with_kwargs_none_matches_empty_kwargs() -> None:
+    """``kwargs=None`` and empty kwargs yield the same derived identity."""
+    assert durable_identity_for_call(sample_function, (1, 2), None) == (
+        durable_identity_for_call(sample_function, (1, 2), {})
+    )

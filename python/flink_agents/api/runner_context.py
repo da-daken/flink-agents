@@ -284,11 +284,13 @@ class RunnerContext(ABC):
             This is a reserved keyword-only parameter and is not forwarded to
             `func`.
         durable_id : str | None
-            Optional stable identity keying this call's persisted state. Supply
-            it when the caller owns an identity that survives failover;
-            otherwise the identity is derived from the callable and its
-            arguments. Reserved keyword-only parameter, not forwarded to
-            `func`.
+            Optional stable identity keying this call's persisted state. When
+            supplied, it is the authoritative recovery identity: recovery
+            matches on the id alone and the arguments are not fingerprinted,
+            so the caller must guarantee that the same id always denotes the
+            same logical call. Otherwise the identity is derived from the
+            callable and its arguments. Reserved keyword-only parameter, not
+            forwarded to `func`.
         **kwargs : Any
             Keyword arguments to pass to the function.
 
@@ -349,11 +351,13 @@ class RunnerContext(ABC):
             This is a reserved keyword-only parameter and is not forwarded to
             `func`.
         durable_id : str | None
-            Optional stable identity keying this call's persisted state. Supply
-            it when the caller owns an identity that survives failover;
-            otherwise the identity is derived from the callable and its
-            arguments. Reserved keyword-only parameter, not forwarded to
-            `func`.
+            Optional stable identity keying this call's persisted state. When
+            supplied, it is the authoritative recovery identity: recovery
+            matches on the id alone and the arguments are not fingerprinted,
+            so the caller must guarantee that the same id always denotes the
+            same logical call. Otherwise the identity is derived from the
+            callable and its arguments. Reserved keyword-only parameter, not
+            forwarded to `func`.
         **kwargs : Any
             Keyword arguments to pass to the function.
 
