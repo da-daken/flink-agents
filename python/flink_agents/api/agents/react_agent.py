@@ -15,6 +15,7 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 #################################################################################
+from collections.abc import Sequence
 from typing import cast
 
 from pydantic import (
@@ -37,11 +38,48 @@ from flink_agents.api.events.event_type import EventType
 from flink_agents.api.prompts.prompt import Prompt
 from flink_agents.api.resource import ResourceDescriptor, ResourceType
 from flink_agents.api.runner_context import RunnerContext
+from flink_agents.api.skills import Skills
 
 _DEFAULT_CHAT_MODEL = "_default_chat_model"
 _DEFAULT_SCHEMA_PROMPT = "_default_schema_prompt"
 _DEFAULT_USER_PROMPT = "_default_user_prompt"
 _OUTPUT_SCHEMA = "_output_schema"
+_SKILLS_ARGUMENT = "skills"
+_SKILLS_SOURCES_ARGUMENT = "skills_sources"
+_SKILLS_RESOURCE_NAME = "_react_agent_skills"
+
+
+def _with_skills(
+    chat_model: ResourceDescriptor, skills: Sequence[str] | None
+) -> ResourceDescriptor:
+    """Combine constructor skills into a copy of the chat model descriptor."""
+    if isinstance(skills, str):
+        # A bare string would otherwise be iterated into one-letter skill names.
+        err_msg = f"skills must be a list of skill names, not the string {skills!r}."
+        raise TypeError(err_msg)
+    if not skills:
+        return chat_model
+    declared = chat_model.arguments.get(_SKILLS_ARGUMENT) or []
+    merged = list(dict.fromkeys([*declared, *skills]))
+    return chat_model.model_copy(
+        update={"arguments": {**chat_model.arguments, _SKILLS_ARGUMENT: merged}}
+    )
+
+
+def _with_skills_sources(
+    chat_model: ResourceDescriptor, skills: Skills
+) -> ResourceDescriptor:
+    """Record source declarations as a marker in the chat model descriptor."""
+    if not skills.sources:
+        return chat_model
+    return chat_model.model_copy(
+        update={
+            "arguments": {
+                **chat_model.arguments,
+                _SKILLS_SOURCES_ARGUMENT: skills.sources,
+            }
+        }
+    )
 
 
 class ReActAgent(Agent):
@@ -102,6 +140,7 @@ class ReActAgent(Agent):
         chat_model: ResourceDescriptor,
         prompt: Prompt | None = None,
         output_schema: type[BaseModel] | RowTypeInfo | None = None,
+        skills: Sequence[str] | Skills | None = None,
     ) -> None:
         """Init method of ReActAgent.
 
@@ -116,15 +155,43 @@ class ReActAgent(Agent):
             The schema should be RowTypeInfo or subclass of BaseModel. When user
             provide output schema, ReAct agent will add system prompt to instruct
             response format of llm, and add output parser according to the schema.
+        skills : Optional[Sequence[str]] = None
+            Names of the skills to expose to the chat model, each matching the
+            ``name`` of a ``SKILL.md`` available to the agent. They are combined
+            with the ``skills`` argument of ``chat_model``: the descriptor's skills
+            come first, followed by these, keeping only the first occurrence of
+            each name. ``None`` or an empty sequence adds nothing, so the
+            descriptor is used exactly as given. The descriptor itself is never
+            modified. Only skill names are combined; the ``bash`` tool's command
+            policy, such as ``allowed_commands``, stays owned by the chat model
+            descriptor and is left unchanged.
 
         Raises:
         ------
         TypeError
-            If the schema is neither a RowTypeInfo nor a BaseModel subclass, or if a
-            BaseModel schema cannot be rendered as a JSON Schema.
+            If the schema is neither a RowTypeInfo nor a BaseModel subclass, if a
+            BaseModel schema cannot be rendered as a JSON Schema, or if ``skills``
+            is a bare string rather than a sequence of names.
         """
         super().__init__()
-        self.add_resource(_DEFAULT_CHAT_MODEL, ResourceType.CHAT_MODEL, chat_model)
+
+        # Handle skills: either a Skills object (register sources + marker) or
+        # a list of skill names (merge into descriptor's "skills" argument).
+        if isinstance(skills, Skills):
+            if skills.sources:
+                self.add_resource(
+                    _SKILLS_RESOURCE_NAME, ResourceType.SKILLS, skills
+                )
+                chat_model = _with_skills_sources(chat_model, skills)
+            # else: empty Skills — pass descriptor unchanged
+        else:
+            chat_model = _with_skills(chat_model, skills)
+
+        self.add_resource(
+            _DEFAULT_CHAT_MODEL,
+            ResourceType.CHAT_MODEL,
+            chat_model,
+        )
 
         if output_schema:
             if isinstance(output_schema, type) and issubclass(output_schema, BaseModel):
